@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+- [chore] 00-daily-analysis 工作流移除 schedule 触发（GitHub schedule 实际延迟 6-7 小时），改由外部定时任务在北京时间 18:00 经 workflow_dispatch 准时触发；如需恢复，取消 yml 中注释掉的两行即可。
+
 - [修复] 当日行情快照在实时行情 overlay 场景下（today 为盘中价并自带 pct_chg、yesterday 日线滞后）改用实时价反推真实前收，统一昨收/涨跌额/振幅口径，避免滞后昨收导致涨跌额数值错误乃至涨跌方向反转；涨跌幅列保留经交叉验证的实时值。
 
 - [修复] ETF 轮动按真实 A 股交易日历保留全池缺报价日期及末尾缺口，防止调仓顺延、周末信号提前和动量窗口缩短；历史日历不可用时明确停止计算。
