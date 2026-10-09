@@ -5157,6 +5157,29 @@ Output the complete Decision Dashboard in JSON format."""
         close = today.get('close')
         high = today.get('high')
         low = today.get('low')
+        pct_chg_raw = today.get('pct_chg')
+
+        # 实时行情 overlay 时，today 可能是盘中价并自带 pct_chg（相对其自身前收），
+        # 而 yesterday 仍是滞后的日线（实测 2026-10-08 日报：昨收列为 10-06 收盘，
+        # 滞后两天；10 只美股全部命中）。此时若直接用滞后昨收算涨跌额/振幅，
+        # 不仅数值错、个别还会反转涨跌方向（AMZN +1.04 vs 真实 -2.60）。
+        # 检测逻辑：表内自算涨跌幅与 today 自带 pct_chg 实质不一致（>0.05 个百分点）
+        # 时，判定为 overlay 场景，用实时价反推真实前收：
+        # prev_close = close / (1 + pct_chg/100)，并以此统一昨收/涨跌额/振幅口径。
+        # 涨跌幅列本身保留实时值（已用 yfinance 日线交叉验证为真）。
+        # 无实时值或两者一致时，保持原逻辑不变。
+        if (
+            pct_chg_raw is not None
+            and prev_close not in (None, 0)
+            and close is not None
+        ):
+            try:
+                self_pct = (float(close) - float(prev_close)) / float(prev_close) * 100
+                reported = float(pct_chg_raw)
+                if abs(self_pct - reported) > 0.05 and reported != -100:
+                    prev_close = float(close) / (1 + reported / 100)
+            except (TypeError, ValueError, ZeroDivisionError):
+                pass
 
         amplitude = None
         change_amount = None
