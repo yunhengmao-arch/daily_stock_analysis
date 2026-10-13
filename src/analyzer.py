@@ -16,6 +16,7 @@ import math
 import re
 import time
 from dataclasses import dataclass
+from datetime import date, datetime
 from typing import Optional, Dict, Any, List, Tuple, Callable, Union
 
 import litellm
@@ -103,6 +104,7 @@ from src.schemas.decision_scale import (
 )
 from src.schemas.report_schema import AnalysisReportSchema
 from src.market_context import detect_market, get_market_role, get_market_guidelines
+from src.core.trading_calendar import get_effective_trading_date
 from src.services.daily_market_context import format_daily_market_context_prompt_section
 from src.market_phase_prompt import format_market_phase_prompt_section
 from src.market_structure_prompt import format_market_structure_prompt_section
@@ -175,6 +177,49 @@ def _today_looks_complete_daily_bar(
     if effective_date and today_date and str(today_date) != str(effective_date):
         return False
     return True
+
+
+def _parse_bar_date(value: Any) -> Optional[date]:
+    """日线 date 字段归一化为 datetime.date；缺失或不可解析时返回 None。"""
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return None
+        try:
+            return date.fromisoformat(text[:10])
+        except ValueError:
+            return None
+    return None
+
+
+def _yesterday_bar_is_fresh(yesterday: Any, market: Optional[str], context: Dict[str, Any]) -> bool:
+    """昨日日线是否为本市场最近一个已收盘交易日。
+
+    可确认是时返回 True——此时昨日收盘价权威，不接受实时 quote 的反推覆盖；
+    日历不可用、日期缺失等无法确认时返回 False（保持原有反推逻辑不变）。
+    """
+    if not isinstance(yesterday, dict):
+        return False
+    bar_date = _parse_bar_date(yesterday.get("date"))
+    if bar_date is None:
+        return False
+    phase_context = context.get("market_phase_context")
+    expected = None
+    if isinstance(phase_context, dict):
+        # 持久化的 effective_daily_bar_date 是第一权威（与现有语义一致）
+        expected = _parse_bar_date(phase_context.get("effective_daily_bar_date"))
+    if expected is None:
+        try:
+            expected = get_effective_trading_date(market)
+        except Exception:
+            return False
+    return bar_date == expected
 
 
 _QUOTE_LABELS_EN = {
@@ -5168,6 +5213,16 @@ Output the complete Decision Dashboard in JSON format."""
         # prev_close = close / (1 + pct_chg/100)，并以此统一昨收/涨跌额/振幅口径。
         # 涨跌幅列本身保留实时值（已用 yfinance 日线交叉验证为真）。
         # 无实时值或两者一致时，保持原逻辑不变。
+        #
+        # 2026-10-12 回归防护：盘前降级行情下，实时 quote 可能只是原样回显
+        # 昨日收盘（价格无新信息），而其 pct_chg 却是相对自家旧基准算出的
+        # artifact（如把上一交易日全天涨跌当作今日盘前涨跌）。此时反推会用
+        # 垃圾值覆盖正确的昨日收盘（10-12 期 10 只美股昨收/涨跌幅全错）。
+        # 因此反推只在同时满足以下两条时才执行：
+        # (1) 实时价相对昨日收盘确有实质变化（|self_pct| > 0.05）：价格回显
+        #     昨日收盘时 quote 未带来新信息，直接跳过；
+        # (2) 昨日日线不是本市场最近一个已收盘交易日：若昨日已是最近交易日，
+        #     其收盘价权威，不接受反推覆盖；无法确认时保持原逻辑。
         if (
             pct_chg_raw is not None
             and prev_close not in (None, 0)
@@ -5176,7 +5231,14 @@ Output the complete Decision Dashboard in JSON format."""
             try:
                 self_pct = (float(close) - float(prev_close)) / float(prev_close) * 100
                 reported = float(pct_chg_raw)
-                if abs(self_pct - reported) > 0.05 and reported != -100:
+                if (
+                    abs(self_pct - reported) > 0.05
+                    and reported != -100
+                    and abs(self_pct) > 0.05
+                    and not _yesterday_bar_is_fresh(
+                        yesterday, detect_market(context.get("code")), context
+                    )
+                ):
                     prev_close = float(close) / (1 + reported / 100)
             except (TypeError, ValueError, ZeroDivisionError):
                 pass
